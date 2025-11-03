@@ -3,8 +3,6 @@
 # Govman Uninstallation Script
 # This script removes Govman and its associated files
 
-set -e
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -37,15 +35,7 @@ is_homebrew() {
         return 0
     fi
     
-    # Method 2: Check if parent process is brew
-    if command -v brew &> /dev/null; then
-        local parent_cmd=$(ps -o comm= $PPID 2>/dev/null)
-        if [[ "$parent_cmd" == *"brew"* ]] || [[ "$parent_cmd" == *"ruby"* ]]; then
-            return 0
-        fi
-    fi
-    
-    # Method 3: Check if running in Homebrew's Ruby environment
+    # Method 2: Check if running in Homebrew's Ruby environment
     if [[ "$0" == *"/Homebrew/"* ]] || [[ "$PWD" == *"/Homebrew/"* ]]; then
         return 0
     fi
@@ -59,11 +49,12 @@ remove_govman() {
     
     # Check if Govman is installed
     if [ ! -d "$GOVMAN_HOME" ]; then
-        error "Govman does not appear to be installed (${GOVMAN_HOME} not found)"
+        warning "Govman directory not found (${GOVMAN_HOME}), skipping removal"
+        return 0
     fi
     
     info "Removing Govman installation directory..."
-    rm -rf "$GOVMAN_HOME"
+    rm -rf "$GOVMAN_HOME" || warning "Failed to remove some Govman files"
 }
 
 # Remove GOVMAN configuration block from shell config files
@@ -74,12 +65,30 @@ remove_shell_config() {
     for config_file in "${shell_files[@]}"; do
         if [ -f "$config_file" ]; then
             info "Cleaning up $config_file..."
-            local tmp_file="${config_file}.tmp"
-            awk '/^# GOVMAN - Go Version Manager$/{p=1;next}/^# END GOVMAN$/{p=0;next}!p' "$config_file" > "$tmp_file"
-            mv "$tmp_file" "$config_file"
-            # Remove any empty lines at the end of file
-            sed -i.bak -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$config_file"
+            
+            # Use perl for cross-platform compatibility
+            perl -i.bak -ne '
+                BEGIN { $skip = 0; }
+                if (/^# GOVMAN - Go Version Manager$/) { 
+                    $skip = 1; 
+                    next; 
+                }
+                if (/^# END GOVMAN$/) { 
+                    $skip = 0; 
+                    next; 
+                }
+                print unless $skip;
+            ' "$config_file" 2>/dev/null || {
+                # Fallback to awk if perl fails
+                awk '/^# GOVMAN - Go Version Manager$/{p=1;next}/^# END GOVMAN$/{p=0;next}!p' "$config_file" > "${config_file}.tmp" && \
+                mv "${config_file}.tmp" "$config_file"
+            }
+            
+            # Clean up backup file
             rm -f "${config_file}.bak"
+            
+            # Remove trailing empty lines (cross-platform)
+            perl -i -pe 'chomp if eof' "$config_file" 2>/dev/null || true
         fi
     done
 }
@@ -88,10 +97,18 @@ remove_shell_config() {
 cleanup_shell_rc() {
     local RC_FILES=("$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile")
     
-    info "Cleaning up shell configuration..."
+    info "Cleaning up additional shell configurations..."
     for RC_FILE in "${RC_FILES[@]}"; do
         if [ -f "$RC_FILE" ]; then
-            sed -i.bak '/export PATH="\$HOME\/.govman\/bin:\$PATH"/d' "$RC_FILE"
+            # Use perl for cross-platform compatibility
+            perl -i.bak -ne 'print unless /export PATH="\$HOME\/\.govman\/bin:\$PATH"/' "$RC_FILE" 2>/dev/null || {
+                # Fallback to sed with platform detection
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' '/export PATH="\$HOME\/.govman\/bin:\$PATH"/d' "$RC_FILE"
+                else
+                    sed -i '/export PATH="\$HOME\/.govman\/bin:\$PATH"/d' "$RC_FILE"
+                fi
+            }
             rm -f "${RC_FILE}.bak"
         fi
     done
@@ -103,10 +120,11 @@ main() {
     
     remove_govman
     remove_shell_config
+    cleanup_shell_rc
     
     success "Govman has been uninstalled successfully!"
     success "Shell configurations have been cleaned up"
-    info "Please restart your terminal for the changes to take effect"
+    info "Please restart your terminal or run: source ~/.bashrc (or ~/.zshrc)"
 }
 
 # Determine if confirmation is needed
@@ -117,7 +135,17 @@ if is_homebrew; then
 else
     # Running manually - ask for confirmation
     warning "This will remove Govman and all installed Go versions."
-    read -p "Are you sure you want to continue? [y/N] " -n 1 -r
+    
+    # Read from /dev/tty to handle piped input (curl | bash)
+    if [ -t 0 ]; then
+        # stdin is a terminal - read normally
+        read -p "Are you sure you want to continue? [y/N] " -n 1 -r
+    else
+        # stdin is piped - read from /dev/tty and print prompt to stderr
+        printf "Are you sure you want to continue? [y/N] " >&2
+        read -n 1 -r < /dev/tty
+    fi
+    
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         main
